@@ -1,0 +1,121 @@
+#!/bin/bash
+
+DEBUG=0
+MOUNT="/"
+WARN="10"
+CRIT="5"
+
+STATE_OK=0
+STATE_WARNING=1
+STATE_CRITICAL=2
+STATE_UNKNOWN=3
+
+USE_SUDO=""
+
+function die_usage() {
+    echo "usage: ${0} [options...] <mount point>"
+
+    echo "check_disk_btrfs plugin"
+    echo "https://github.com/koshatul/check_disk_btrfs"
+    echo
+    echo "Usage: $0 <options>"
+    echo "  -s            Use sudo"
+    echo "  -w <warn>     Percent free to trigger warning (default 10)"
+    echo "  -c <crit>     Percent free to trigger critical (default 5)"
+    exit ${STATE_UNKNOWN}
+}
+
+function formatnum() {
+    which numfmt > /dev/null 2>&1
+    if [[ $? == 0 ]]; then
+        numfmt --to=iec --format='%0.2f' "${1}"
+    else
+        echo "${1}"
+    fi
+}
+
+while [[ $# -ge 1 ]] ; do
+    arg="$1"
+    case $arg in
+        -s)
+            USE_SUDO="sudo "
+            ;;
+        -w)
+            WARN="$2"
+            shift
+            ;;
+        -c)
+            CRIT="$2"
+            shift
+            ;;
+        -h|--help)
+            die_usage
+            ;;
+        /*)
+            MOUNT="${1}"
+            ;;
+        *)
+            echo "error: unknown argument \"${@}\"" >&2
+            die_usage
+            ;;
+    esac
+    shift
+done
+
+[ ${DEBUG} == 1 ] && echo "MOUNT: ${MOUNT}"
+[ ${DEBUG} == 1 ] && echo "CRITICAL: ${CRIT}"
+[ ${DEBUG} == 1 ] && echo "WARNING: ${WARN}"
+
+BTRFS_OUTPUT="$(${USE_SUDO} btrfs fi usage -b ${MOUNT})"
+
+# sed -nr -e 's/([^,]+),([^:]+):.*Size:([0-9]+)[^0-9]*Used:([0-9]+)$/\1:\2:\3\:\4/p' <<<"${BTRFS_OUTPUT}"
+# Data:RAID0:2147483648:401637376
+# Metadata:RAID1:1073741824:29687808
+# System:RAID1:8388608:16384
+
+# MOUNT_FREE="$(sed -nr -e 's/.*Free \(estimated\):[^0-9]+([0-9]+)[^0-9].*/\1/p' <<<"${BTRFS_OUTPUT}")"
+# [ ${DEBUG} == 1 ] && echo "MOUNT_FREE: ${MOUNT_FREE}"
+
+MOUNT_FREE="$(sed -nr -e 's/.*Free \(estimated\):.*min:[^0-9]*([0-9]+)[^0-9].*/\1/p' <<<"${BTRFS_OUTPUT}")"
+[ ${DEBUG} == 1 ] && echo "MOUNT_FREE: ${MOUNT_FREE}"
+
+MOUNT_USED="$(sed -nr -e 's/^ *Used:[^0-9]*([0-9]+)[^0-9]*$/\1/p' <<<"${BTRFS_OUTPUT}")"
+[ ${DEBUG} == 1 ] && echo "MOUNT_USED: ${MOUNT_USED}"
+
+DEVICE_SIZE="$(sed -nr -e 's/.*Device size:[^0-9]*([0-9]+)[^0-9]*$/\1/p' <<<"${BTRFS_OUTPUT}")"
+[ ${DEBUG} == 1 ] && echo "DEVICE_SIZE: ${DEVICE_SIZE}"
+
+DEVICE_ALLOCATED="$(sed -nr -e 's/.*Device allocated:[^0-9]*([0-9]+)[^0-9]*$/\1/p' <<<"${BTRFS_OUTPUT}")"
+[ ${DEBUG} == 1 ] && echo "DEVICE_ALLOCATED: ${DEVICE_ALLOCATED}"
+
+DEVICE_UNALLOCATED="$(sed -nr -e 's/.*Device unallocated:[^0-9]*([0-9]+)[^0-9]*$/\1/p' <<<"${BTRFS_OUTPUT}")"
+[ ${DEBUG} == 1 ] && echo "DEVICE_UNALLOCATED: ${DEVICE_UNALLOCATED}"
+
+DEVICE_MISSING="$(sed -nr -e 's/.*Device missing:[^0-9]*([0-9]+)[^0-9]*$/\1/p' <<<"${BTRFS_OUTPUT}")"
+[ ${DEBUG} == 1 ] && echo "DEVICE_MISSING: ${DEVICE_MISSING}"
+
+DEVICE_USED_PCNT="$(awk "BEGIN { pc=100*${DEVICE_ALLOCATED}/${DEVICE_SIZE}; i=int(pc); print (pc-i<0.5)?i:i+1 }")"
+[ ${DEBUG} == 1 ] && echo "DEVICE_USED_PCNT: ${DEVICE_USED_PCNT}"
+
+DEVICE_FREE_PCNT="$(expr 100 - ${DEVICE_USED_PCNT})"
+[ ${DEBUG} == 1 ] && echo "DEVICE_FREE_PCNT: ${DEVICE_FREE_PCNT}"
+
+STATUS="UNKNOWN"
+EXIT_CODE=${STATE_UNKNOWN}
+
+if [ ${DEVICE_FREE_PCNT} -lt 0 ]; then
+    STATUS="UNKNOWN"
+    EXIT_CODE=${STATE_UNKNOWN}
+elif [ ${DEVICE_FREE_PCNT} -lt ${CRIT} ]; then
+    STATUS="CRITICAL"
+    EXIT_CODE=${STATE_CRITICAL}
+elif [ ${DEVICE_FREE_PCNT} -lt ${WARN} ]; then
+    STATUS="WARNING"
+    EXIT_CODE=${STATE_WARNING}
+elif [ ${DEVICE_FREE_PCNT} -ge ${WARN} ]; then
+    STATUS="OK"
+    EXIT_CODE=${STATE_OK}
+fi
+
+echo "${STATUS} - ${MOUNT} $(formatnum ${DEVICE_UNALLOCATED}) (${DEVICE_FREE_PCNT}%) Free ${MOUNT} = $(formatnum ${DEVICE_ALLOCATED});$(formatnum ${DEVICE_UNALLOCATED});$(formatnum ${DEVICE_SIZE}) | ${MOUNT}=${MOUNT_FREE};${MOUNT_USED};${DEVICE_SIZE};${DEVICE_ALLOCATED};${DEVICE_MISSING};${DEVICE_USED_PCNT}"
+exit ${EXIT_CODE}
